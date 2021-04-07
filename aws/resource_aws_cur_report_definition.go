@@ -216,14 +216,14 @@ func describeCurReportDefinition(conn *costandusagereportservice.CostandUsageRep
 	log.Printf("[DEBUG] Reading CurReportDefinition: %s", reportName)
 
 	var matchingReportDefinition *costandusagereportservice.ReportDefinition
-	err := conn.DescribeReportDefinitionsPages(params, func(resp *costandusagereportservice.DescribeReportDefinitionsOutput, isLast bool) bool {
+	err := conn.DescribeReportDefinitionsPages(params, func(resp *costandusagereportservice.DescribeReportDefinitionsOutput, lastPage bool) bool {
 		for _, reportDefinition := range resp.ReportDefinitions {
 			if aws.StringValue(reportDefinition.ReportName) == reportName {
 				matchingReportDefinition = reportDefinition
 				return false
 			}
 		}
-		return !isLast
+		return !lastPage
 	})
 	if err != nil {
 		return nil, err
