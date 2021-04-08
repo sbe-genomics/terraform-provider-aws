@@ -382,7 +382,9 @@ rules:
       include:
         - aws/resource_aws_route53_resolver_[e-z]*.go
         - aws/resource_aws_route53_[s-z]*.go
-        - aws/resource_aws_s*.go
+        - aws/resource_aws_service_discovery_private*.go
+        - aws/resource_aws_service_discovery_http*.go
+        - aws/resource_aws_secretsmanager*.go
     patterns:
       - pattern: |
           $X.$Z(..., func(..., $Y bool) {
