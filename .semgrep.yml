@@ -380,7 +380,11 @@ rules:
     message: Use lastPage for bool variable in pagination functions
     paths:
       include:
-        - aws/
+        - aws/resource_aws_cog*.go
+        - aws/resource_aws_cloudwatch_log*.go
+        - aws/resource_aws_code*.go
+        - aws/resource_aws_db*.go
+        - aws/resource_aws_ec2*.go
     patterns:
       - pattern: |
           $X.$Z(..., func(..., $Y bool) {
