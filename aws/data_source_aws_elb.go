@@ -184,7 +184,8 @@ func dataSourceAwsElb() *schema.Resource {
 				Set:      schema.HashString,
 			},
 
-			"tags": tagsSchemaComputed(),
+			"tags":     tagsSchemaComputed(),
+			"tags_all": tagsSchemaComputed(),
 
 			"zone_id": {
 				Type:     schema.TypeString,
@@ -196,6 +197,7 @@ func dataSourceAwsElb() *schema.Resource {
 
 func dataSourceAwsElbRead(d *schema.ResourceData, meta interface{}) error {
 	elbconn := meta.(*AWSClient).elbconn
+	defaultTagsConfig := meta.(*AWSClient).DefaultTagsConfig
 	ignoreTagsConfig := meta.(*AWSClient).IgnoreTagsConfig
 
 	lbName := d.Get("name").(string)
@@ -223,5 +225,5 @@ func dataSourceAwsElbRead(d *schema.ResourceData, meta interface{}) error {
 	}
 	d.Set("arn", arn.String())
 
-	return flattenAwsELbResource(d, meta.(*AWSClient).ec2conn, elbconn, resp.LoadBalancerDescriptions[0], ignoreTagsConfig)
+	return flattenAwsELbResource(d, meta.(*AWSClient).ec2conn, elbconn, resp.LoadBalancerDescriptions[0], ignoreTagsConfig, defaultTagsConfig)
 }
