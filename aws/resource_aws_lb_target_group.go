@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/hashicorp/aws-sdk-go-base/tfawserr"
+	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
@@ -699,36 +700,19 @@ func flattenAwsLbTargetGroupResource(d *schema.ResourceData, meta interface{}, t
 	d.Set("name", targetGroup.TargetGroupName)
 	d.Set("target_type", targetGroup.TargetType)
 
-	healthCheck := make(map[string]interface{})
-	healthCheck["enabled"] = aws.BoolValue(targetGroup.HealthCheckEnabled)
-	healthCheck["healthy_threshold"] = int(aws.Int64Value(targetGroup.HealthyThresholdCount))
-	healthCheck["interval"] = int(aws.Int64Value(targetGroup.HealthCheckIntervalSeconds))
-	healthCheck["port"] = aws.StringValue(targetGroup.HealthCheckPort)
-	healthCheck["protocol"] = aws.StringValue(targetGroup.HealthCheckProtocol)
-	healthCheck["timeout"] = int(aws.Int64Value(targetGroup.HealthCheckTimeoutSeconds))
-	healthCheck["unhealthy_threshold"] = int(aws.Int64Value(targetGroup.UnhealthyThresholdCount))
+	if err := d.Set("health_check", flattenLbTargetGroupHealthCheck(targetGroup)); err != nil {
+		return fmt.Errorf("error setting health_check: %w", err)
+	}
 
-	if targetGroup.HealthCheckPath != nil {
-		healthCheck["path"] = aws.StringValue(targetGroup.HealthCheckPath)
-	}
-	if targetGroup.Matcher != nil && targetGroup.Matcher.HttpCode != nil {
-		healthCheck["matcher"] = aws.StringValue(targetGroup.Matcher.HttpCode)
-	}
-	if targetGroup.Matcher != nil && targetGroup.Matcher.GrpcCode != nil {
-		healthCheck["matcher"] = aws.StringValue(targetGroup.Matcher.GrpcCode)
-	}
 	if v, _ := d.Get("target_type").(string); v != elbv2.TargetTypeEnumLambda {
 		d.Set("vpc_id", targetGroup.VpcId)
 		d.Set("port", targetGroup.Port)
 		d.Set("protocol", targetGroup.Protocol)
 	}
+
 	switch d.Get("protocol").(string) {
 	case elbv2.ProtocolEnumHttp, elbv2.ProtocolEnumHttps:
 		d.Set("protocol_version", targetGroup.ProtocolVersion)
-	}
-
-	if err := d.Set("health_check", []interface{}{healthCheck}); err != nil {
-		return fmt.Errorf("error setting health_check: %w", err)
 	}
 
 	attrResp, err := conn.DescribeTargetGroupAttributes(&elbv2.DescribeTargetGroupAttributesInput{
@@ -738,24 +722,32 @@ func flattenAwsLbTargetGroupResource(d *schema.ResourceData, meta interface{}, t
 		return fmt.Errorf("error retrieving Target Group Attributes: %w", err)
 	}
 
+	var errs *multierror.Error
+
 	for _, attr := range attrResp.Attributes {
 		switch aws.StringValue(attr.Key) {
+		case "deregistration_delay.timeout_seconds":
+			timeout, err := strconv.Atoi(aws.StringValue(attr.Value))
+			if err != nil {
+				errs = multierror.Append(errs, fmt.Errorf("error converting deregistration_delay.timeout_seconds to int: %s", aws.StringValue(attr.Value)))
+			}
+			d.Set("deregistration_delay", timeout)
 		case "lambda.multi_value_headers.enabled":
 			enabled, err := strconv.ParseBool(aws.StringValue(attr.Value))
 			if err != nil {
-				return fmt.Errorf("error converting lambda.multi_value_headers.enabled to bool: %s", aws.StringValue(attr.Value))
+				errs = multierror.Append(errs, fmt.Errorf("error converting lambda.multi_value_headers.enabled to bool: %s", aws.StringValue(attr.Value)))
 			}
 			d.Set("lambda_multi_value_headers_enabled", enabled)
 		case "proxy_protocol_v2.enabled":
 			enabled, err := strconv.ParseBool(aws.StringValue(attr.Value))
 			if err != nil {
-				return fmt.Errorf("error converting proxy_protocol_v2.enabled to bool: %s", aws.StringValue(attr.Value))
+				errs = multierror.Append(errs, fmt.Errorf("error converting proxy_protocol_v2.enabled to bool: %s", aws.StringValue(attr.Value)))
 			}
 			d.Set("proxy_protocol_v2", enabled)
 		case "slow_start.duration_seconds":
 			slowStart, err := strconv.Atoi(aws.StringValue(attr.Value))
 			if err != nil {
-				return fmt.Errorf("error converting slow_start.duration_seconds to int: %s", aws.StringValue(attr.Value))
+				errs = multierror.Append(errs, fmt.Errorf("error converting slow_start.duration_seconds to int: %s", aws.StringValue(attr.Value)))
 			}
 			d.Set("slow_start", slowStart)
 		case "load_balancing.algorithm.type":
@@ -764,14 +756,23 @@ func flattenAwsLbTargetGroupResource(d *schema.ResourceData, meta interface{}, t
 		case "preserve_client_ip.enabled":
 			_, err := strconv.ParseBool(aws.StringValue(attr.Value))
 			if err != nil {
-				return fmt.Errorf("error converting preserve_client_ip.enabled to bool: %s", aws.StringValue(attr.Value))
+				errs = multierror.Append(errs, fmt.Errorf("error converting preserve_client_ip.enabled to bool: %s", aws.StringValue(attr.Value)))
 			}
 			d.Set("preserve_client_ip", attr.Value)
 		}
 	}
 
-	if err = flattenAwsLbTargetGroupStickiness(d, attrResp.Attributes); err != nil {
-		return err
+	if errs.ErrorOrNil() != nil {
+		return fmt.Errorf("error setting Target Group (%s) Attributes: %w", d.Id(), errs.ErrorOrNil())
+	}
+
+	stickinessAttr, err := flattenAwsLbTargetGroupStickiness(attrResp.Attributes)
+	if err != nil {
+		return fmt.Errorf("error flattening stickiness: %w", err)
+	}
+
+	if err := d.Set("stickiness", stickinessAttr); err != nil {
+		return fmt.Errorf("error setting stickiness: %w", err)
 	}
 
 	tags, err := keyvaluetags.Elbv2ListTags(conn, d.Id())
@@ -787,41 +788,34 @@ func flattenAwsLbTargetGroupResource(d *schema.ResourceData, meta interface{}, t
 	return nil
 }
 
-func flattenAwsLbTargetGroupStickiness(d *schema.ResourceData, attributes []*elbv2.TargetGroupAttribute) error {
-	stickinessMap := map[string]interface{}{}
+func flattenAwsLbTargetGroupStickiness(attributes []*elbv2.TargetGroupAttribute) ([]interface{}, error) {
+	if len(attributes) == 0 {
+		return []interface{}{}, nil
+	}
+
+	m := make(map[string]interface{})
+	var errs *multierror.Error
+
 	for _, attr := range attributes {
 		switch aws.StringValue(attr.Key) {
 		case "stickiness.enabled":
 			enabled, err := strconv.ParseBool(aws.StringValue(attr.Value))
 			if err != nil {
-				return fmt.Errorf("error converting stickiness.enabled to bool: %s", aws.StringValue(attr.Value))
+				errs = multierror.Append(errs, fmt.Errorf("error converting stickiness.enabled to bool: %s", aws.StringValue(attr.Value)))
 			}
-			stickinessMap["enabled"] = enabled
+			m["enabled"] = enabled
 		case "stickiness.type":
-			stickinessMap["type"] = aws.StringValue(attr.Value)
+			m["type"] = aws.StringValue(attr.Value)
 		case "stickiness.lb_cookie.duration_seconds":
 			duration, err := strconv.Atoi(aws.StringValue(attr.Value))
 			if err != nil {
-				return fmt.Errorf("error converting stickiness.lb_cookie.duration_seconds to int: %s", aws.StringValue(attr.Value))
+				errs = multierror.Append(errs, fmt.Errorf("error converting stickiness.lb_cookie.duration_seconds to int: %s", aws.StringValue(attr.Value)))
 			}
-			stickinessMap["cookie_duration"] = duration
-		case "deregistration_delay.timeout_seconds":
-			timeout, err := strconv.Atoi(aws.StringValue(attr.Value))
-			if err != nil {
-				return fmt.Errorf("error converting deregistration_delay.timeout_seconds to int: %s", aws.StringValue(attr.Value))
-			}
-			d.Set("deregistration_delay", timeout)
+			m["cookie_duration"] = duration
 		}
 	}
 
-	setStickyMap := []interface{}{}
-	if len(stickinessMap) > 0 {
-		setStickyMap = []interface{}{stickinessMap}
-	}
-	if err := d.Set("stickiness", setStickyMap); err != nil {
-		return err
-	}
-	return nil
+	return []interface{}{m}, errs.ErrorOrNil()
 }
 
 func resourceAwsLbTargetGroupCustomizeDiff(_ context.Context, diff *schema.ResourceDiff, v interface{}) error {
@@ -891,4 +885,32 @@ func resourceAwsLbTargetGroupCustomizeDiff(_ context.Context, diff *schema.Resou
 		}
 	}
 	return nil
+}
+
+func flattenLbTargetGroupHealthCheck(targetGroup *elbv2.TargetGroup) []interface{} {
+	if targetGroup == nil {
+		return []interface{}{}
+	}
+
+	m := map[string]interface{}{
+		"enabled":             aws.BoolValue(targetGroup.HealthCheckEnabled),
+		"healthy_threshold":   int(aws.Int64Value(targetGroup.HealthyThresholdCount)),
+		"interval":            int(aws.Int64Value(targetGroup.HealthCheckIntervalSeconds)),
+		"port":                aws.StringValue(targetGroup.HealthCheckPort),
+		"protocol":            aws.StringValue(targetGroup.HealthCheckProtocol),
+		"timeout":             int(aws.Int64Value(targetGroup.HealthCheckTimeoutSeconds)),
+		"unhealthy_threshold": int(aws.Int64Value(targetGroup.UnhealthyThresholdCount)),
+	}
+
+	if targetGroup.HealthCheckPath != nil {
+		m["path"] = aws.StringValue(targetGroup.HealthCheckPath)
+	}
+	if targetGroup.Matcher != nil && targetGroup.Matcher.HttpCode != nil {
+		m["matcher"] = aws.StringValue(targetGroup.Matcher.HttpCode)
+	}
+	if targetGroup.Matcher != nil && targetGroup.Matcher.GrpcCode != nil {
+		m["matcher"] = aws.StringValue(targetGroup.Matcher.GrpcCode)
+	}
+
+	return []interface{}{m}
 }
